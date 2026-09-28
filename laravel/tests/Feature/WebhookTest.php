@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessWebhookJob;
 use App\Models\WebhookEvent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class WebhookTest extends TestCase
@@ -44,6 +46,18 @@ class WebhookTest extends TestCase
         $response->assertStatus(422);
     }
 
+    public function test_webhook_event_id_cannot_exceed_255_characters(): void
+    {
+        $response = $this->postJson('/api/webhooks/stripe', [
+            'event_id' => str_repeat('a', 256),
+            'type' => 'payment.succeeded',
+            'payload' => ['amount' => 1000],
+        ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonValidationErrors('event_id');
+    }
+
     public function test_webhook_status_can_be_retrieved(): void
     {
         $event = WebhookEvent::create([
@@ -68,5 +82,57 @@ class WebhookTest extends TestCase
         $response = $this->getJson('/api/webhooks/99999');
 
         $response->assertStatus(404);
+    }
+
+    public function test_webhook_duplicate_ids_with_same_provider(): void
+    {
+        Queue::fake();
+
+        $response1 = $this->postJson('/api/webhooks/stripe', [
+            'event_id' => 'evt_004',
+            'type' => 'payment.succeeded',
+            'payload' => ['amount' => 500],
+        ]);
+
+        $response2 = $this->postJson('/api/webhooks/stripe', [
+            'event_id' => 'evt_004',
+            'type' => 'payment.succeeded',
+            'payload' => ['amount' => 100],
+        ]);
+
+        $response1->assertStatus(202);
+        $response2->assertStatus(200);
+        $this->assertSame($response1->json('id'), $response2->json('id'));
+
+        Queue::assertPushed(ProcessWebhookJob::class, 1);
+
+        $this->assertDatabaseCount('webhook_events', 1);
+
+        $event = WebhookEvent::sole();
+        $this->assertSame('stripe', $event->provider);
+        $this->assertSame('evt_004', $event->event_id);
+        $this->assertSame('payment.succeeded', $event->type);
+        $this->assertSame(['amount' => 500], $event->payload);
+    }
+
+    public function test_webhook_duplicate_ids_with_different_provider(): void
+    {
+        Queue::fake();
+
+        $duplicate = [
+            'event_id' => 'evt_005',
+            'type' => 'payment.succeeded',
+            'payload' => ['amount' => 500],
+        ];
+
+        $response1 = $this->postJson('/api/webhooks/stripe', $duplicate);
+        $response2 = $this->postJson('/api/webhooks/worldpay', $duplicate);
+
+        $response1->assertStatus(202);
+        $response2->assertStatus(202);
+
+        Queue::assertPushed(ProcessWebhookJob::class, 2);
+
+        $this->assertDatabaseCount('webhook_events', 2);
     }
 }

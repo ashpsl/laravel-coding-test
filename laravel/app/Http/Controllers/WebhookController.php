@@ -11,28 +11,32 @@ class WebhookController extends Controller
 {
     public function receive(Request $request, string $provider): JsonResponse
     {
+        $request->merge(['provider' => $provider]);
+
         $request->validate([
-            'event_id' => 'required|string',
-            'type'     => 'required|string',
-            'payload'  => 'required|array',
+            'provider' => 'required|string|max:255',
+            'event_id' => 'required|string|max:255',
+            'type' => 'required|string',
+            'payload' => 'required|array',
         ]);
 
-        // TODO: How should duplicate events be handled?
-        // TODO: What happens if two requests arrive simultaneously with the same event_id?
-        $event = WebhookEvent::create([
+        $event = WebhookEvent::createOrFirst([
             'event_id' => $request->input('event_id'),
             'provider' => $provider,
-            'type'     => $request->input('type'),
-            'payload'  => $request->input('payload'),
-            'status'   => 'pending',
+        ], [
+            'type' => $request->input('type'),
+            'payload' => $request->input('payload'),
+            'status' => 'pending',
         ]);
 
-        ProcessWebhookJob::dispatch($event);
+        if ($event->wasRecentlyCreated) {
+            ProcessWebhookJob::dispatch($event)->afterCommit();
+        }
 
         return response()->json([
             'id'     => $event->id,
             'status' => $event->status,
-        ], 202);
+        ], $event->wasRecentlyCreated ? 202 : 200);
     }
 
     public function show(int $id): JsonResponse

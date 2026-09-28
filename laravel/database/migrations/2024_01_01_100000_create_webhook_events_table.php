@@ -17,9 +17,6 @@ return new class extends Migration
             $table->string('status')->default('pending'); // pending | processing | completed | failed
             $table->text('error_message')->nullable();
             $table->timestamps();
-
-            // TODO: How should duplicate events be handled?
-            // TODO: Should event_id be unique per provider?
         });
     }
 
