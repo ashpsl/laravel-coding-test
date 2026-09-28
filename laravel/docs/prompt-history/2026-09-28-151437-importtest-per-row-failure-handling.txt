@@ -1,0 +1,361 @@
+
+❯ I've implemented per-row failure handling for the CSV import on this branch.
+  Before I commit, write tests in @tests/Feature/ImportTest.php for these
+  cases:
+
+  1. A CSV with two valid rows and one invalid row (bad email). Assert both
+  valid users are created, the invalid one isn't, and the import job finishes
+  as completed rather than failed.
+  2. A row with an invalid email. Assert the stored ImportJobFailure has the
+  correct row number and a validation message, and assert it does NOT contain
+  the email address or password from the row. This is the important one,
+  failure records must not leak row data.
+  3. A row with more columns than the header. Assert the import completes and
+  records it as a failure rather than throwing.
+  4. A file with a known mix of good and bad rows. Assert total_rows,
+  processed_rows and failed_rows on the import job are correct.
+  5. Assert the uploaded CSV is deleted from storage after a successful import.
+
+  Follow the existing test style in that file. Don't add cases beyond these.
+  ⎿  Read tests/Feature/ImportTest.php (68 lines)
+
+⏺ I'll read the implementation first so the tests line up with it.
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ There's no failed_rows column on import_jobs—it's actually returned as a
+  failure count via GET /api/imports/{id}, so I'll have case 4 check it through
+  that endpoint. Since the queue runs synchronously in tests, posting the file
+  will trigger the full import.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(tests/Feature/ImportTest.php)
+  ⎿  Added 107 lines
+       64  
+       65          $response->assertStatus(404);
+       66      }
+       67 +                                                              
+       68 +    public function test_invalid_rows_do_not_fail_the_whole_im
+          +port(): void                                                  
+       69 +    {                                                         
+       70 +        Storage::fake('local');                               
+       71 +                                                              
+       72 +        $csv = UploadedFile::fake()->createWithContent(       
+       73 +            'users.csv',                                      
+       74 +            "name,email,password\n"                           
+       75 +            . "John Doe,john@example.com,password123\n"       
+       76 +            . "Bad Row,not-an-email,password123\n"            
+       77 +            . "Jane Doe,jane@example.com,password123"         
+       78 +        );                                                    
+       79 +                                                              
+       80 +        $response = $this->postJson('/api/imports', ['file' =>
+          + $csv]);                                                      
+       81 +                                                              
+       82 +        $response->assertStatus(202);                         
+       83 +        $this->assertDatabaseHas('users', ['email' => 'john@ex
+          +ample.com']);                                                 
+       84 +        $this->assertDatabaseHas('users', ['email' => 'jane@ex
+          +ample.com']);                                                 
+       85 +        $this->assertDatabaseMissing('users', ['email' => 'not
+          +-an-email']);                                                 
+       86 +        $this->assertEquals('completed', ImportJob::find($resp
+          +onse->json('id'))->status);                                   
+       87 +    }                                                         
+       88 +                                                              
+       89 +    public function test_failure_record_does_not_leak_row_data
+          +(): void                                                      
+       90 +    {                                                         
+       91 +        Storage::fake('local');                               
+       92 +                                                              
+       93 +        $csv = UploadedFile::fake()->createWithContent(       
+       94 +            'users.csv',                                      
+       95 +            "name,email,password\nBad Row,leaky-address,SuperS
+          +ecret123"                                                     
+       96 +        );                                                    
+       97 +                                                              
+       98 +        $response = $this->postJson('/api/imports', ['file' =>
+          + $csv]);                                                      
+       99 +                                                              
+      100 +        $failure = ImportJob::find($response->json('id'))->imp
+          +ortJobFailures()->sole();                                     
+      101 +                                                              
+      102 +        $this->assertEquals(2, $failure->row_number);         
+      103 +        $this->assertNotEmpty($failure->errors);              
+      104 +        $this->assertStringContainsString('email', $failure->e
+          +rrors[0]);                                                    
+      105 +                                                              
+      106 +        $raw = $failure->getRawOriginal('errors');            
+      107 +        $this->assertStringNotContainsString('leaky-address', 
+          +$raw);                                                        
+      108 +        $this->assertStringNotContainsString('SuperSecret123',
+          + $raw);                                                       
+      109 +    }                                                         
+      110 +                                                              
+      111 +    public function test_row_with_extra_columns_is_recorded_as
+          +_failure(): void                                              
+      112 +    {                                                         
+      113 +        Storage::fake('local');                               
+      114 +                                                              
+      115 +        $csv = UploadedFile::fake()->createWithContent(       
+      116 +            'users.csv',                                      
+      117 +            "name,email,password\nJohn Doe,john@example.com,pa
+          +ssword123,extra"                                              
+      118 +        );                                                    
+      119 +                                                              
+      120 +        $response = $this->postJson('/api/imports', ['file' =>
+          + $csv]);                                                      
+      121 +                                                              
+      122 +        $job = ImportJob::find($response->json('id'));        
+      123 +                                                              
+      124 +        $this->assertEquals('completed', $job->status);       
+      125 +        $this->assertEquals(1, $job->importJobFailures()->coun
+          +t());                                                         
+      126 +        $this->assertEquals(2, $job->importJobFailures()->sole
+          +()->row_number);                                              
+      127 +        $this->assertDatabaseMissing('users', ['email' => 'joh
+          +n@example.com']);                                             
+      128 +    }                                                         
+      129 +                                                              
+      130 +    public function test_import_row_counts_are_correct(): void
+      131 +    {                                                         
+      132 +        Storage::fake('local');                               
+      133 +                                                              
+      134 +        $csv = UploadedFile::fake()->createWithContent(       
+      135 +            'users.csv',                                      
+      136 +            "name,email,password\n"                           
+      137 +            . "User One,one@example.com,password123\n"        
+      138 +            . "Bad Email,not-an-email,password123\n"          
+      139 +            . "User Two,two@example.com,password123\n"        
+      140 +            . "Short Password,short@example.com,short\n"      
+      141 +            . "Extra Column,extra@example.com,password123,extr
+          +a\n"                                                          
+      142 +            . "User Three,three@example.com,password123"      
+      143 +        );                                                    
+      144 +                                                              
+      145 +        $id = $this->postJson('/api/imports', ['file' => $csv]
+          +)->json('id');                                                
+      146 +                                                              
+      147 +        $response = $this->getJson("/api/imports/{$id}");     
+      148 +                                                              
+      149 +        $response->assertStatus(200);                         
+      150 +        $response->assertJson([                               
+      151 +            'status'         => 'completed',                  
+      152 +            'total_rows'     => 6,                            
+      153 +            'processed_rows' => 6,                            
+      154 +            'failed_rows'    => 3,                            
+      155 +        ]);                                                   
+      156 +    }                                                         
+      157 +                                                              
+      158 +    public function test_uploaded_file_is_deleted_after_succes
+          +sful_import(): void                                           
+      159 +    {                                                         
+      160 +        Storage::fake('local');                               
+      161 +                                                              
+      162 +        $csv = UploadedFile::fake()->createWithContent(       
+      163 +            'users.csv',                                      
+      164 +            "name,email,password\nJohn Doe,john@example.com,pa
+          +ssword123"                                                    
+      165 +        );                                                    
+      166 +                                                              
+      167 +        $response = $this->postJson('/api/imports', ['file' =>
+          + $csv]);                                                      
+      168 +                                                              
+      169 +        $job = ImportJob::find($response->json('id'));        
+      170 +                                                              
+      171 +        $this->assertEquals('completed', $job->status);       
+      172 +        Storage::disk('local')->assertMissing($job->filename);
+      173 +    }                                                         
+      174  }
+
+⏺ The "disk not found" warning also appears on the existing test at line 19, so
+  it looks like an IDE false positive. Running the tests:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All 5 new tests pass. The one failure is the existing
+  test_csv_upload_is_accepted. I'll check whether your branch changes caused it:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I added the 5 tests to ImportTest.php (tests/Feature/ImportTest.php) and they
+  all pass. One test that was already in the file now fails because of your
+  branch changes, and I haven't changed it.
+
+  The existing failure: test_csv_upload_is_accepted checks for filename =>
+  'users.csv' at ImportTest.php:31 (tests/Feature/ImportTest.php#L31). Your
+  controller now uses $file->store('imports'), which saves the file under a
+  random name like imports/oOhl….csv. That change looks deliberate. The old code
+  saved the file to imports/users.csv but recorded the path as users.csv, so
+  the job was looking in the wrong place. The test just needs its assertion
+  updated to match. I left it alone because you asked for no changes beyond the
+  5 cases; I can update it if you want.
+
+  What each new test does: each one sets up a fake disk and posts a CSV to
+  /api/imports. Jobs run straight away in tests, so each post runs the whole
+  import.
+
+  1. test_invalid_rows_do_not_fail_the_whole_import: both valid users are
+     created, the bad-email user isn't, and the status is completed.
+  2. test_failure_record_does_not_leak_row_data: checks the failure record is on
+     row 2 and has an email validation message. It then searches the raw stored
+     errors JSON and confirms neither leaky-address nor SuperSecret123 appears.
+  3. test_row_with_extra_columns_is_recorded_as_failure: the import completes,
+     one failure is recorded on row 2, and no user is created.
+  4. test_import_row_counts_are_correct: 6 rows (3 good, plus a bad email, a
+     short password and an extra column). There's no failed_rows column on
+     import_jobs; the count only comes from GET /api/imports/{id}, so that's
+     where the test checks it. It expects total_rows: 6, processed_rows: 6,
+     failed_rows: 3.
+  5. test_uploaded_file_is_deleted_after_successful_import: checks the status is
+     completed and the stored file is gone from the fake disk.
+
+❯ Before I commit, review the changed files on this branch against the git
+  diff. I'm specifically interested in whether any customer data from the CSV
+  can end up somewhere it shouldn't: the failure records returned by the API,
+  the application log, or the file left on disk. Don't review style or suggest
+  refactors, I've already been through those
+
+⏺ I'll pull the full branch diff and check the things that decide where row data
+  can end up: auth on the routes, custom validation messages, where the local
+  disk is stored, and which database is used.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I'll confirm the main suspect concretely: when an insert fails, what does the
+  exception message contain?
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ php looks like it runs inside a container that can't see my scratchpad, so
+  I'll run the probe inline instead.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The probe confirms the main leak: a failed user insert produces a message
+  containing the name, email and password hash. I'll get exact line numbers for
+  the report.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Customer data can leak through all three routes you asked about. The failure
+  records themselves are clean. The problems are in the exception handling and
+  the cleanup path.
+
+  1. The application log gets the customer's name, email and password hash.
+  Confirmed.
+  At ProcessImportJob.php:87 (app/Jobs/ProcessImportJob.php#L87) the log line
+  records $e->getMessage() whenever User::create throws. Laravel's database
+  exception messages include the full SQL with its values filled in. I
+  reproduced it with a duplicate insert:
+
+  ... SQL: insert into "users" ("name", "email", "password", ...) values (Jane
+  Customer, jane@example.com, $2y$12$j26RQA..., ...)
+
+  Two realistic ways to hit this on your MariaDB setup (strict mode, utf8mb4):
+  - Non-UTF-8 CSVs. Excel commonly exports Latin-1, so a name like "José"
+    arrives as invalid UTF-8. The string rule accepts it, and MariaDB then
+    rejects the insert with "Incorrect string value", putting the whole row in
+    the log.
+  - Duplicate emails. Two imports running at the same time with the same email
+    both pass the unique check, and the second insert fails.
+
+  The fix is to log only the exception class and error code, not the message.
+
+  2. The API response, log and failed_jobs table can all get row data.
+  Plausible: it only happens when a database error hits the email check.
+  The unique:users,email check at ProcessImportJob.php:60
+  (app/Jobs/ProcessImportJob.php#L60) queries the database but sits outside the
+  try. If that query throws (lost connection, lock timeout, and possibly invalid
+  UTF-8 on MariaDB), the job fails:
+  - failed() at ProcessImportJob.php:127 (app/Jobs/ProcessImportJob.php#L127)
+    writes $e->getMessage() into error_message. That message includes the email
+    from the query.
+  - GET /api/imports/{id} returns error_message, and that route has no
+    authentication. IDs are sequential, so anyone can walk through them.
+  - The queue worker also logs the full exception and stores it in
+    failed_jobs.exception.
+
+  failed() storing the raw message existed before this branch. What's new is
+  that the loop now runs a database query per row, so a query containing
+  customer data can now be the thing that fails. The fix is to store a generic
+  error_message and move the checks into the try (or catch around the whole loop
+  body).
+
+  3. The uploaded file stays on disk when an import fails. Confirmed.
+  Storage::delete at ProcessImportJob.php:120
+  (app/Jobs/ProcessImportJob.php#L120) only runs when the import succeeds. Any
+  exception, including the one in point 2, leaves the full CSV with plaintext
+  passwords in storage/app/private/imports/ indefinitely. The fix is to delete
+  it in failed() as well. Don't put the delete in a finally inside handle(),
+  because that would break retries if you ever set tries above 1.
+
+  Checked and fine:
+  - Failure records from the API: they store only the row number and the
+    validation messages. The default messages don't include the submitted value,
+    there's no lang/ override adding :input, and the "Column count" and "Could
+    not be imported" messages are fixed text. Test case 2 covers this.
+  - File storage: uploads go to the private local disk under random names, which
+    also fixes the old problem of two uploads with the same filename
+    overwriting each other.
+
+❯ <ide_opened_file>The user opened the file /Users/ashley/dev/go-car-credit/lar
+  avel-coding-test/laravel/app/Jobs/ProcessImportJob.php in the IDE. This may
+  or may not be related to the current task.</ide_opened_file>
+
+❯ I've fixed points 1 and 3, the log line now records the exception class only
+  and the failed method deletes the uploaded file with the plaintext passwords
+  so it isn't retained after a failed import.
+
+  For point 2, update the failed method to store a generic error message. Log
+  the exception class and the import job id only, not the message, for the same
+  reason as point 1. I'm not addressing missing authentication since it's out
+  of scope for this branch
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(app/Jobs/ProcessImportJob.php)
+  ⎿  Added 6 lines, removed 1 line
+      124      {
+      125          Storage::delete($this->importJob->filename);
+      126          
+      127 +        Log::error('Import failed', [                         
+      128 +            'import_job_id' => $this->importJob->id,          
+      129 +            'exception' => $e::class,                         
+      130 +        ]);                                                   
+      131 +                                                              
+      132          $this->importJob->update([
+      133              'status'        => 'failed',
+      129 -            'error_message' => $e->getMessage(),              
+      134 +            'error_message' => 'The import could not be comple
+          +ted.',                                                        
+      135          ]);
+      136      }
+      137  
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I've updated failed() in ProcessImportJob.php:123
+  (app/Jobs/ProcessImportJob.php#L123):
+  - It stores the fixed message The import could not be completed. in
+    error_message, so GET /api/imports/{id} no longer returns the exception
+    text.
+  - It logs Import failed with only import_job_id and the exception class,
+    matching your row-level log line.
+  - Your file deletion at the top of the method is unchanged.
+
+  All 9 tests in ImportTest.php pass, including test_csv_upload_is_accepted,
+  which was failing before. You must have updated it since.
+
+  This doesn't fully close point 2. When a job fails, Laravel's queue worker
+  also records the exception itself, separately from failed(). It logs the full
+  exception, message included, through the exception handler, and writes it to
+  failed_jobs.exception. So a failed unique-check query still puts the email
+  into the log and that table.
+
+  Two ways to close that, if you want to on this branch:
+  - Catch around the loop body in handle() and throw a generic exception without
+    the original as its previous one. Then the worker only ever sees the
+    generic message.
+  - Tell the exception handler not to report QueryException from this job. That
+    covers the log but not failed_jobs.

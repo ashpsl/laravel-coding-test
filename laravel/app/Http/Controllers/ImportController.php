@@ -16,8 +16,7 @@ class ImportController extends Controller
         ]);
 
         $file = $request->file('file');
-        $filename = $file->getClientOriginalName();
-        $file->storeAs('imports', $filename);
+        $filename = $file->store('imports');
 
         $job = ImportJob::create([
             'filename' => $filename,
@@ -34,16 +33,22 @@ class ImportController extends Controller
 
     public function show(int $id): JsonResponse
     {
-        $job = ImportJob::findOrFail($id);
+        $job = ImportJob::withCount('importJobFailures')->findOrFail($id);
+
+        $failures = $job->importJobFailures()
+            ->orderBy('row_number')
+            ->paginate(50);
 
         return response()->json([
-            'id'             => $job->id,
-            'filename'       => $job->filename,
-            'status'         => $job->status,
-            'total_rows'     => $job->total_rows,
-            'processed_rows' => $job->processed_rows,
-            'error_message'  => $job->error_message,
-            'created_at'     => $job->created_at,
+            'id'              => $job->id,
+            'filename'        => $job->filename,
+            'status'          => $job->status,
+            'total_rows'      => $job->total_rows,
+            'processed_rows'  => $job->processed_rows,
+            'failed_rows'     => $job->import_job_failures_count,
+            'error_message'   => $job->error_message,
+            'created_at'      => $job->created_at,
+            'failures'        => $failures,
         ]);
     }
 }
