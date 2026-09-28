@@ -28,6 +28,7 @@ class ProcessImportJob implements ShouldQueue
                 'status'        => 'failed',
                 'error_message' => 'File not found.',
             ]);
+
             return;
         }
 
@@ -52,6 +53,7 @@ class ProcessImportJob implements ShouldQueue
                     'created_at' => now(),
                     'updated_at' => now(),
                 ];
+
                 continue;
             }
 
@@ -63,7 +65,7 @@ class ProcessImportJob implements ShouldQueue
                 'password' => 'required|string|min:8',
             ]);
 
-            if ($validator->fails()){
+            if ($validator->fails()) {
                 $failures[] = [
                     'import_job_id' => $this->importJob->id,
                     'row_number' => $rowNumber,
@@ -71,6 +73,7 @@ class ProcessImportJob implements ShouldQueue
                     'created_at' => now(),
                     'updated_at' => now(),
                 ];
+
                 continue;
             }
 
@@ -123,7 +126,7 @@ class ProcessImportJob implements ShouldQueue
     public function failed(\Throwable $e): void
     {
         Storage::delete($this->importJob->filename);
-        
+
         Log::error('Import failed', [
             'import_job_id' => $this->importJob->id,
             'exception' => $e::class,

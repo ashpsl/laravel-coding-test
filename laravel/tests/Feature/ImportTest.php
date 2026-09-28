@@ -28,7 +28,7 @@ class ImportTest extends TestCase
         $response->assertStatus(202);
         $response->assertJsonStructure(['id', 'status']);
         $this->assertEquals('pending', $response->json('status'));
-        
+
         $job = ImportJob::find($response->json('id'));
         $this->assertStringStartsWith('imports/', $job->filename);
         Storage::disk('local')->assertExists($job->filename);
@@ -75,9 +75,9 @@ class ImportTest extends TestCase
         $csv = UploadedFile::fake()->createWithContent(
             'users.csv',
             "name,email,password\n"
-            . "John Doe,john@example.com,password123\n"
-            . "Bad Row,not-an-email,password123\n"
-            . "Jane Doe,jane@example.com,password123"
+            ."John Doe,john@example.com,password123\n"
+            ."Bad Row,not-an-email,password123\n"
+            .'Jane Doe,jane@example.com,password123'
         );
 
         $response = $this->postJson('/api/imports', ['file' => $csv]);
@@ -137,12 +137,12 @@ class ImportTest extends TestCase
         $csv = UploadedFile::fake()->createWithContent(
             'users.csv',
             "name,email,password\n"
-            . "User One,one@example.com,password123\n"
-            . "Bad Email,not-an-email,password123\n"
-            . "User Two,two@example.com,password123\n"
-            . "Short Password,short@example.com,short\n"
-            . "Extra Column,extra@example.com,password123,extra\n"
-            . "User Three,three@example.com,password123"
+            ."User One,one@example.com,password123\n"
+            ."Bad Email,not-an-email,password123\n"
+            ."User Two,two@example.com,password123\n"
+            ."Short Password,short@example.com,short\n"
+            ."Extra Column,extra@example.com,password123,extra\n"
+            .'User Three,three@example.com,password123'
         );
 
         $id = $this->postJson('/api/imports', ['file' => $csv])->json('id');
